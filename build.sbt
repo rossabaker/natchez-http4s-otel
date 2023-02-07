@@ -26,7 +26,8 @@ val catsV = "2.7.0"
 val catsEffectV = "3.3.11"
 val fs2V = "3.2.7"
 val http4sV = "0.23.12"
-val natchezV = "0.1.6"
+val openTelemetryV = "1.22.0"
+val otel4sV = "0.1.0"
 val munitCatsEffectV = "1.0.7"
 
 val slf4jV    = "1.7.30"
@@ -57,7 +58,7 @@ lazy val core = crossProject(JVMPlatform, JSPlatform)
       "org.http4s"                  %%% "http4s-client"        % http4sV,
 
       "io.chrisdavenport"           %%% "fiberlocal"           % "0.1.1",
-      "org.tpolecat"                %%% "natchez-core"         % natchezV,
+      "org.typelevel"               %%% "otel4s-core-trace"    % otel4sV,
 
 
       "org.typelevel"               %%% "munit-cats-effect-3"        % munitCatsEffectV         % Test,
@@ -73,12 +74,16 @@ lazy val examples = project.in(file("examples"))
   .settings(
     scalacOptions        -= "-Xfatal-warnings",
     libraryDependencies ++= Seq(
-      "org.tpolecat" %% "natchez-jaeger"      % natchezV,
+      "org.typelevel"    %% "otel4s-java" % otel4sV,
+      "io.opentelemetry" % "opentelemetry-exporter-otlp" % openTelemetryV % Runtime,
+      "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % s"${openTelemetryV}-alpha" % Runtime,
       "org.http4s"   %% "http4s-dsl"          % http4sV,
       "org.http4s"   %% "http4s-ember-server" % http4sV,
       "org.http4s"   %% "http4s-ember-client" % http4sV,
       "org.slf4j"     % "slf4j-simple"        % slf4jV,
-    )
+    ),
+    run / fork := true,
+    javaOptions += "-Dotel.java.global-autoconfigure.enabled=true"
   )
 
 lazy val site = project.in(file("site"))

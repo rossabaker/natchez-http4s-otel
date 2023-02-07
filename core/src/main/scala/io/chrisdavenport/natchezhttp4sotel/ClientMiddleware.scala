@@ -5,7 +5,8 @@ import cats.syntax.all._
 import cats.effect.kernel._
 import org.http4s._
 import org.typelevel.ci.CIString
-import natchez._
+import org.typelevel.otel4s.Attribute
+import org.typelevel.otel4s.trace.Tracer
 import scala.collection.mutable.ListBuffer
 import org.http4s.headers._
 import org.http4s.client._
@@ -15,7 +16,7 @@ import org.http4s.client.middleware.Retry
 
 object ClientMiddleware {
 
-  def default[F[_]: natchez.Trace: MonadCancelThrow](ep: EntryPoint[F]): ClientMiddlewareBuilder[F] = {
+  def default[F[_]: Tracer: MonadCancelThrow]: ClientMiddlewareBuilder[F] = {
     new ClientMiddlewareBuilder[F](ep, Defaults.reqHeaders, Defaults.respHeaders, Defaults.clientSpanName, Defaults.additionalRequestTags, Defaults.additionalResponseTags, Defaults.includeUrl)
   }
 
@@ -23,18 +24,18 @@ object ClientMiddleware {
     val reqHeaders = OTHttpTags.Headers.defaultHeadersIncluded
     val respHeaders = OTHttpTags.Headers.defaultHeadersIncluded
     def clientSpanName[F[_]]: Request[F] => String = {(req: Request[F]) => s"Http Client - ${req.method}"}
-    def additionalRequestTags[F[_]]: Request[F] => Seq[(String, TraceValue)] = {(_: Request[F]) => Seq()}
-    def additionalResponseTags[F[_]]: Response[F] => Seq[(String, TraceValue)] = {(_: Response[F]) => Seq()}
+    def additionalRequestTags[F[_]]: Request[F] => Seq[Attribute[_]] = {(_: Request[F]) => Seq()}
+    def additionalResponseTags[F[_]]: Response[F] => Seq[Attribute[_]] = {(_: Response[F]) => Seq()}
     def includeUrl[F[_]]: Request[F] => Boolean = {(_: Request[F]) => true}
   }  
 
-  final class ClientMiddlewareBuilder[F[_]: natchez.Trace: MonadCancelThrow] private[ClientMiddleware] (
+  final class ClientMiddlewareBuilder[F[_]: Tracer: MonadCancelThrow] private[ClientMiddleware] (
     private val ep: EntryPoint[F],
     private val reqHeaders: Set[CIString],
     private val respHeaders: Set[CIString],
     private val clientSpanName: Request[F] => String,
-    private val additionalRequestTags: Request[F] => Seq[(String, TraceValue)],
-    private val additionalResponseTags: Response[F] => Seq[(String, TraceValue)],
+    private val additionalRequestTags: Request[F] => Seq[Attribute[_]],
+    private val additionalResponseTags: Response[F] => Seq[Attribute[_]],
     private val includeUrl: Request[F] => Boolean
   ){ self => 
     private def copy(
@@ -42,8 +43,8 @@ object ClientMiddleware {
       reqHeaders: Set[CIString] = self.reqHeaders,
       respHeaders: Set[CIString] = self.respHeaders,
       clientSpanName: Request[F] => String = self.clientSpanName,
-      additionalRequestTags: Request[F] => Seq[(String, TraceValue)] = self.additionalRequestTags,
-      additionalResponseTags: Response[F] => Seq[(String, TraceValue)] = self.additionalResponseTags ,
+      additionalRequestTags: Request[F] => Seq[Attribute[_]] = self.additionalRequestTags,
+      additionalResponseTags: Response[F] => Seq[Attribute[_]] = self.additionalResponseTags ,
       includeUrl: Request[F] => Boolean = self.includeUrl,
     ): ClientMiddlewareBuilder[F] = 
       new ClientMiddlewareBuilder[F](ep, reqHeaders, respHeaders, clientSpanName, additionalRequestTags, additionalResponseTags, includeUrl)
@@ -54,10 +55,10 @@ object ClientMiddleware {
 
     def withClientSpanName(clientSpanName: Request[F] => String) = copy(clientSpanName = clientSpanName)
 
-    def withAdditionalRequestTags(additionalRequestTags: Request[F] => Seq[(String, TraceValue)]) =
+    def withAdditionalRequestTags(additionalRequestTags: Request[F] => Seq[Attribute[_]]) =
       copy(additionalRequestTags = additionalRequestTags)
 
-    def withAdditionalResponseTags(additionalResponseTags: Response[F] => Seq[(String, TraceValue)]) =
+    def withAdditionalResponseTags(additionalResponseTags: Response[F] => Seq[Attribute[_]]) =
       copy(additionalResponseTags = additionalResponseTags)
     
     def withIncludeUrl(includeUrl: Request[F] => Boolean ) = copy(includeUrl = includeUrl)
@@ -67,7 +68,7 @@ object ClientMiddleware {
         val base = request(req, reqHeaders, includeUrl) ++ additionalRequestTags(req)
         MonadCancelThrow[Resource[F, *]].uncancelable(poll => 
           for {
-            baggage <- Resource.eval(Trace[F].kernel)
+            baggage <- Resource.eval(Tracer[F].kernel)
             span <- ep.continueOrElseRoot(clientSpanName(req), baggage)
             _ <- Resource.eval(span.put(base:_*))
             knl <- Resource.eval(span.kernel)
@@ -82,7 +83,7 @@ object ClientMiddleware {
                   )
                 )
               case Outcome.Errored(e) => 
-                val exitCase: (String, TraceValue) = ("exit.case" -> TraceValue.stringToTraceValue("errored"))
+                val exitCase: Attribute[_] = Attribute("exit.case" -> "errored")
                 val error = OTHttpTags.Errors.error(e)
                 Resource.eval(
                   span.put((exitCase :: error):_*)
@@ -106,30 +107,13 @@ object ClientMiddleware {
     }
   }
 
-  val ExtraTagsKey: Key[List[(String, TraceValue)]] = Key.newKey[cats.effect.SyncIO, List[(String, TraceValue)]].unsafeRunSync()
+  val ExtraTagsKey: Key[List[Attribute[_]]] = Key.newKey[cats.effect.SyncIO, List[Attribute[_]]].unsafeRunSync()
 
-  @deprecated("0.2.1", "Direct Method is Deprecated, use default with the builder instead.")
-  def trace[F[_]: natchez.Trace: MonadCancelThrow](
-    ep: EntryPoint[F], // This is to escape from F Trace to Resource[F, *] timing. Which is critical
-    reqHeaders: Set[CIString] = OTHttpTags.Headers.defaultHeadersIncluded,
-    respHeaders: Set[CIString] = OTHttpTags.Headers.defaultHeadersIncluded,
-    clientSpanName: Request[F] => String = {(req: Request[F]) => s"Http Client - ${req.method}"},
-    additionalRequestTags: Request[F] => Seq[(String, TraceValue)] = {(_: Request[F]) => Seq()},
-    additionalResponseTags: Response[F] => Seq[(String, TraceValue)] = {(_: Response[F]) => Seq()},
-  )(client: Client[F]): Client[F] = 
-    default(ep)
-    .withRequestHeaders(reqHeaders)
-    .withResponseHeaders(respHeaders)
-    .withClientSpanName(clientSpanName)
-    .withAdditionalRequestTags(additionalRequestTags)
-    .withAdditionalResponseTags(additionalResponseTags)
-    .build(client)
-
-  private[natchezhttp4sotel] def request[F[_]](req: Request[F], headers: Set[CIString]): List[(String, TraceValue)] = {
+  private[natchezhttp4sotel] def request[F[_]](req: Request[F], headers: Set[CIString]): List[Attribute[_]] = {
     request(req, headers, Function.const[Boolean, Request[F]](true)(_))
   }
-  def request[F[_]](request: Request[F], headers: Set[CIString], includeUrl: Request[F] => Boolean): List[(String, TraceValue)] = {
-    val builder = new ListBuffer[(String, TraceValue)]()
+  def request[F[_]](request: Request[F], headers: Set[CIString], includeUrl: Request[F] => Boolean): List[Attribute[_]] = {
+    val builder = new ListBuffer[Attribute[_]]()
     builder += OTHttpTags.Common.kind("client")
     builder += OTHttpTags.Common.method(request.method)
     if (includeUrl(request)) {
@@ -173,8 +157,8 @@ object ClientMiddleware {
 
 
 
-  def response[F[_]](response: Response[F], headers: Set[CIString]): List[(String, TraceValue)] = {
-    val builder = new ListBuffer[(String, TraceValue)]()
+  def response[F[_]](response: Response[F], headers: Set[CIString]): List[Attribute[_]] = {
+    val builder = new ListBuffer[Attribute[_]]()
 
     builder += OTHttpTags.Common.status(response.status)
     response.contentLength.foreach{l => 
